@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:PrinterTool"
-        Title="PrinterConnect" MinWidth="760" MinHeight="480"
+        Title="PrinterConnect" MinWidth="760" MinHeight="480" UseLayoutRounding="True"
         Background="{DynamicResource Paper}"
         FontFamily="Segoe UI Variable Text, Segoe UI"
         FontSize="13" Foreground="{DynamicResource Ink}"
@@ -37,9 +37,19 @@
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <Image Source="logo.png" Width="26" Height="26" Margin="0,0,10,0"
                        RenderOptions.BitmapScalingMode="HighQuality" VerticalAlignment="Center"/>
-                <TextBlock x:Name="TitleText" Text="PrinterConnect" VerticalAlignment="Center"
-                           FontFamily="Segoe UI Variable Display, Segoe UI"
-                           FontSize="20" FontWeight="SemiBold"/>
+                <!-- Wordmark, same system as ClearSource: light + semibold + gradient dot -->
+                <TextBlock x:Name="TitleText" VerticalAlignment="Center"
+                           FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="21">
+                    <Run Text="Printer" FontWeight="Light"/><Run Text="Connect" FontWeight="SemiBold"/>
+                </TextBlock>
+                <Ellipse Width="5" Height="5" Margin="2,0,0,5" VerticalAlignment="Bottom">
+                    <Ellipse.Fill>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                            <GradientStop Color="#1760D6" Offset="0"/>
+                            <GradientStop Color="#0B72A0" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Ellipse.Fill>
+                </Ellipse>
             </StackPanel>
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -48,7 +58,7 @@
                 <Grid>
                     <TextBox x:Name="ServerBox" Width="260" Style="{StaticResource ThemedTextBox}"
                              Padding="8,5,30,5" KeyDown="ServerBox_KeyDown"/>
-                    <ToggleButton x:Name="ServerDrop" Width="26" HorizontalAlignment="Right"
+                    <ToggleButton x:Name="ServerDrop" IsHitTestVisible="{Binding IsOpen, ElementName=ServerPopup, Converter={x:Static local:Converters.Invert}}" Width="26" HorizontalAlignment="Right"
                                   Margin="0,1,1,1" Cursor="Hand" Focusable="False">
                         <ToggleButton.Template>
                             <ControlTemplate TargetType="ToggleButton">
@@ -64,7 +74,7 @@
                             </ControlTemplate>
                         </ToggleButton.Template>
                     </ToggleButton>
-                    <Popup IsOpen="{Binding IsChecked, ElementName=ServerDrop, Mode=TwoWay}"
+                    <Popup x:Name="ServerPopup" IsOpen="{Binding IsChecked, ElementName=ServerDrop, Mode=TwoWay}"
                            PlacementTarget="{Binding ElementName=ServerBox}" Placement="Bottom"
                            AllowsTransparency="True" StaysOpen="False">
                         <Border Background="{DynamicResource Card}" BorderBrush="{DynamicResource Line}"
@@ -198,7 +208,7 @@
                 <ComboBox x:Name="ThemeBox" Width="54" Height="30"
                           Style="{StaticResource IconCombo}"
                           SelectionChanged="ThemeBox_SelectionChanged" Margin="0,0,6,0"/>
-                <ToggleButton x:Name="LangButton" Width="40" Height="30" Margin="0,0,6,0" Cursor="Hand">
+                <ToggleButton x:Name="LangButton" IsHitTestVisible="{Binding IsOpen, ElementName=LangPopup, Converter={x:Static local:Converters.Invert}}" Width="40" Height="30" Margin="0,0,6,0" Cursor="Hand">
                     <ToggleButton.Template>
                         <ControlTemplate TargetType="ToggleButton">
                             <Border x:Name="bd" Background="Transparent" CornerRadius="4"
@@ -218,7 +228,7 @@
                         </ControlTemplate>
                     </ToggleButton.Template>
                 </ToggleButton>
-                <Popup IsOpen="{Binding IsChecked, ElementName=LangButton, Mode=TwoWay}"
+                <Popup x:Name="LangPopup" IsOpen="{Binding IsChecked, ElementName=LangButton, Mode=TwoWay}"
                        PlacementTarget="{Binding ElementName=LangButton}" Placement="Bottom"
                        AllowsTransparency="True" StaysOpen="False">
                     <Border Background="{DynamicResource Card}" BorderBrush="{DynamicResource Line}"
@@ -236,7 +246,7 @@
                         </ItemsControl>
                     </Border>
                 </Popup>
-                <ToggleButton x:Name="ColumnsButton" Width="30" Height="30" Margin="0,0,6,0" Cursor="Hand">
+                <ToggleButton x:Name="ColumnsButton" IsHitTestVisible="{Binding IsOpen, ElementName=ColumnsPopup, Converter={x:Static local:Converters.Invert}}" Width="30" Height="30" Margin="0,0,6,0" Cursor="Hand">
                     <ToggleButton.Template>
                         <ControlTemplate TargetType="ToggleButton">
                             <Border x:Name="bd" Background="Transparent" CornerRadius="4"
@@ -256,7 +266,7 @@
                         </ControlTemplate>
                     </ToggleButton.Template>
                 </ToggleButton>
-                <Popup IsOpen="{Binding IsChecked, ElementName=ColumnsButton, Mode=TwoWay}"
+                <Popup x:Name="ColumnsPopup" IsOpen="{Binding IsChecked, ElementName=ColumnsButton, Mode=TwoWay}"
                        PlacementTarget="{Binding ElementName=ColumnsButton}" Placement="Bottom"
                        AllowsTransparency="True" StaysOpen="False">
                     <Border Background="{DynamicResource Card}" BorderBrush="{DynamicResource Line}"
@@ -280,7 +290,7 @@
                                         <CheckBox Content="{Binding Label}" IsChecked="{Binding Visible, Mode=TwoWay}"
                                                   IsEnabled="{Binding CanHide}" Margin="6,4"
                                                   Foreground="{DynamicResource Ink}"
-                                                  Checked="ColumnToggle_Changed" Unchecked="ColumnToggle_Changed"/>
+                                                  Click="ColumnToggle_Changed"/>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
@@ -328,6 +338,8 @@
                           VirtualizingPanel.IsVirtualizing="True"
                           VirtualizingPanel.IsVirtualizingWhenGrouping="True"
                           VirtualizingPanel.VirtualizationMode="Recycling"
+                          VirtualizingPanel.CacheLengthUnit="Item"
+                          VirtualizingPanel.CacheLength="3,3"
                           ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                           SelectionMode="Extended"
                           MouseDoubleClick="List_MouseDoubleClick"
@@ -778,6 +790,9 @@
         <!-- Status bar -->
         <Grid Grid.Row="3" Margin="2,10,2,0">
             <TextBlock x:Name="CountText" Foreground="{DynamicResource InkSoft}" FontSize="12"/>
+            <!-- Shown only when columns stepped aside to keep Install on screen -->
+            <TextBlock x:Name="HiddenColumnsText" HorizontalAlignment="Right" FontSize="12"
+                       Foreground="{DynamicResource Hint}"/>
         </Grid>
     </Grid>
 </Window>

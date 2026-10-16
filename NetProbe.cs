@@ -24,6 +24,7 @@ public static class NetProbe
         while (attempts.Count > 0)
         {
             var done = await Task.WhenAny(attempts);
+            ct.ThrowIfCancellationRequested();   // a cancelled refresh is not "device offline"
             if (done.Result) return Result.Reachable;
             attempts.Remove(done);
         }

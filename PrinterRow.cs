@@ -34,7 +34,18 @@ public sealed class PrinterRow : INotifyPropertyChanged
         _ => null,
     };
     /// <summary>Jobs waiting in this queue right now (from the print server).</summary>
-    public uint Jobs { get; init; }
+    private uint _jobs;
+    public uint Jobs
+    {
+        get => _jobs;
+        set { if (_jobs == value) return; _jobs = value; Notify(); Notify(nameof(JobsText)); }
+    }
+
+    /// <summary>
+    /// Bumped whenever an install/remove starts or ends. A status poll that began before
+    /// the change carries stale data and must not flip the row back.
+    /// </summary>
+    public int ChangeStamp { get; private set; }
     public string JobsText => Jobs == 0 ? "" : Jobs.ToString();
     public string Port { get; init; } = "";
     /// <summary>Device address parsed from the port name; empty for WSD/LPR/virtual queues.</summary>
@@ -42,7 +53,7 @@ public sealed class PrinterRow : INotifyPropertyChanged
 
     /// <summary>http URL of the device's web interface, or "" when no real IPv4 is known.</summary>
     private static readonly System.Text.RegularExpressions.Regex Ipv4 =
-        new(@"\d{1,3}(?:\.\d{1,3}){3}", System.Text.RegularExpressions.RegexOptions.Compiled);
+        new(@"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>The IPv4 address contained in the port name, or "" (handles "IP_10.1.2.3" style names).</summary>
     public string IpAddress
@@ -50,7 +61,14 @@ public sealed class PrinterRow : INotifyPropertyChanged
         get
         {
             var m = Ipv4.Match(Ip ?? "");
-            return m.Success && System.Net.IPAddress.TryParse(m.Value, out _) ? m.Value : "";
+            if (!m.Success) return "";
+            var parts = m.Value.Split('.');
+            var octets = new int[4];
+            for (int i = 0; i < 4; i++)
+                if (!int.TryParse(parts[i], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out octets[i]) || octets[i] > 255)
+                    return "";
+            return string.Join(".", octets);
         }
     }
 
@@ -183,7 +201,7 @@ public sealed class PrinterRow : INotifyPropertyChanged
     public bool Busy
     {
         get => _busy;
-        set { _busy = value; Notify(); Notify(nameof(ActionLabel)); }
+        set { _busy = value; ChangeStamp++; Notify(); Notify(nameof(ActionLabel)); }
     }
 
     public string ActionLabel =>
@@ -340,6 +358,8 @@ public sealed class PrinterRow : INotifyPropertyChanged
 
     public void RefreshLanguage()
     {
+        Notify(nameof(DriverTypeTip));
+        Notify(nameof(GroupLabel));
         Notify(nameof(ActionLabel));
         Notify(nameof(StatusText));
         Notify(nameof(StatusTooltip));

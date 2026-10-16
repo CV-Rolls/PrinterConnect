@@ -13,6 +13,9 @@ public static class AboutWindow
 {
     private static readonly (string Version, string Note)[] Notes =
     {
+        ("3.12", "New logo and wordmark in the ClearSource style · smooth, fast window resizing · Install/Remove always fully visible"),
+        ("3.11", "Full code review: security hardening against malformed network replies, safer settings saving, exact Excel export (serials keep leading zeros), live job counts, theme and dark-mode fixes, more translations"),
+        ("3.10", "Install is always on screen: on small or scaled laptop screens, low-priority columns step aside automatically instead of pushing the Install button out of view"),
         ("3.9",  "Attribution simplified: ClearVantage.io is named as the developer throughout"),
         ("3.8",  "Clear print queue: one click removes stuck jobs (whole queue with manage rights, your own jobs otherwise)"),
         ("3.7",  "Column alignment choice (left / center) · Windows 11 Fluent buttons: neutral secondaries and quiet-destructive Remove"),
@@ -40,6 +43,7 @@ public static class AboutWindow
     {
         var win = new Window
         {
+            FlowDirection = Loc.Lang == "ar" ? FlowDirection.RightToLeft : FlowDirection.LeftToRight,
             Owner = owner,
             Title = appName,
             Width = 540,
@@ -108,6 +112,12 @@ public static class AboutWindow
         };
         credit.Inlines.Add(link);
         head.Children.Add(credit);
+        head.Children.Add(new TextBlock
+        {
+            Text = "Developed by Roland Aring",
+            Foreground = (Brush)Application.Current.Resources["InkSoft"],
+            Margin = new Thickness(0, 0, 0, 6),
+        });
 
         head.Children.Add(new TextBlock
         {

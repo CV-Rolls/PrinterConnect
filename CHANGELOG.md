@@ -2,6 +2,79 @@
 
 All notable changes to PrinterConnect. Newest first.
 
+## 3.12.0 — 2026-09-30
+
+- New app icon and wordmark in the ClearSource design language: blue gradient
+  rounded square with the white printer and colour toner stripes; "Printer" light +
+  "Connect" semibold + gradient dot
+- About shows "Developed by Roland Aring"
+
+## 3.11.4 — 2026-09-30
+
+- Fast corner resizing. The printer list no longer keeps a full extra screen of
+  rows above and below the visible ones (WPF's default), so a taller window no longer
+  means up to three times the rows rebuilt on every frame. Height-only changes skip
+  column fitting entirely, fitting is throttled while the edge is being dragged and
+  done exactly once on release, and layout snaps to whole pixels
+
+## 3.11.3 — 2026-09-30
+
+- Smooth window resizing: column fitting runs at most once per frame while dragging,
+  widths are only touched when they change, and the on-screen check waits until the
+  window has settled. Previously every pixel of a drag could rebuild all columns
+
+## 3.11.2 — 2026-09-30
+
+- Fixed properly: Install/Remove could still be cut off. Column widths were each
+  "at least their minimum", but the extra given to small columns was never taken back
+  from the others, so rows overran the window by 30–75 px. Widths now always add up to
+  the visible width, and after drawing the app measures the real right edge and
+  corrects itself if anything still sticks out
+
+## 3.11.1 — 2026-09-30
+
+- Fixed: the right edge of each row (the test-page button beside Remove) was cut off.
+  Column fitting now accounts for the rows' own padding
+
+## 3.11.0 — 2026-09-30
+
+Full line-by-line code review. Fixes:
+
+- **Security:** a malformed SNMP reply from any device on the network could freeze
+  the app (infinite loop). Lengths are now validated, replies must carry the request-id
+  that was sent, and the parser was fuzz-tested with 20,000 random packets
+- **Regression from 3.10.0:** switched-off columns showed at startup and the saved
+  column order was reset — fixed
+- **Settings** are saved atomically with a backup, so a crash or a second instance can
+  no longer wipe the server list and layout
+- **Excel export** no longer guesses numbers: serials keep leading zeros, long serials
+  stay exact, decimal commas stay text; Pages and Jobs are real numbers on every
+  regional format; emoji are kept
+- Jobs count updates live, and after Clear queue
+- A status poll can no longer undo an install or remove that just happened, and polls
+  no longer pile up when a print server is slow
+- Clear queue retries when jobs arrive mid-clear, and deletes every job Windows allows
+- Error 0x00000bcb now explains the Point-and-Print admin block correctly
+- Saved Light/Dark choice applies from the first frame; the language menu follows theme
+  changes; accent buttons pick readable text colour; hint text meets contrast minimums
+- Dropdowns close when their own button is clicked again; spinners stop animating when
+  hidden (idle CPU); the header no longer shifts while loading
+- Setting the default printer no longer freezes the window on a slow server; removing
+  a printer no longer takes over a default that belongs to an unlisted server
+- Arabic uses right-to-left layout; all printer statuses translated in all 14 languages
+- A startup failure now exits instead of leaving an invisible process
+- Release builds check that the tag matches the version; sign.ps1 fails loudly
+
+## 3.10.0 — 2026-09-29
+
+- **Install is always on screen.** On small laptops, 125–150 % display scaling or a
+  snapped half-screen window, the grid used to overflow and cut off the Install/Remove
+  column. Columns now step aside by priority (uptime, display, trays, driver … first)
+  until everything fits; Printer, Status and Install/Remove are never hidden. Widen the
+  window and they come back. The status bar says how many columns are hidden.
+- Action column is sized to its real content, so the test-page button is no longer clipped
+- Manual column widths are still respected — until they would push Install off screen
+
 ## 3.9.0 — 2026-07-26
 
 - Attribution simplified: ClearVantage.io is named as developer and maintainer

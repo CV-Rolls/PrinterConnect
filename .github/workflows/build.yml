@@ -26,11 +26,15 @@ jobs:
       - name: Rename with version
         shell: pwsh
         run: |
-          $v = ([xml](Get-Content PrinterTool.csproj)).Project.PropertyGroup.Version | Where-Object { $_ }
+          $v = ([xml](Get-Content PrinterTool.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ($env:GITHUB_REF -like 'refs/tags/v*' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match <Version>$v</Version> in PrinterTool.csproj"
+          }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item bin/Release/net48/PrinterConnect.exe        "dist/PrinterConnect-$v.exe"
           Copy-Item bin/Release/net48/PrinterConnect.exe.config "dist/PrinterConnect-$v.exe.config"
-          (Get-FileHash "dist/PrinterConnect-$v.exe" -Algorithm SHA256).Hash | Out-File "dist/PrinterConnect-$v.exe.sha256"
+          $h = (Get-FileHash "dist/PrinterConnect-$v.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$h  PrinterConnect-$v.exe" | Set-Content -NoNewline -Encoding ascii "dist/PrinterConnect-$v.exe.sha256"
           Get-Content "dist/PrinterConnect-$v.exe.sha256"
 
       - name: Upload build artifact

@@ -35,9 +35,13 @@ if (-not $Thumbprint) {
 }
 
 # signtool ships with the Windows SDK; fall back to Set-AuthenticodeSignature
+# Thumbprints copied from certmgr often carry spaces or an invisible U+200E mark
+$Thumbprint = ($Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+
 $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue
 if ($signtool) {
     & $signtool.Source sign /sha1 $Thumbprint /fd SHA256 /td SHA256 /tr $TimestampUrl $ExePath
+    if ($LASTEXITCODE -ne 0) { throw "signtool failed with exit code $LASTEXITCODE" }
 } else {
     $cert = Get-Item "Cert:\CurrentUser\My\$Thumbprint"
     Set-AuthenticodeSignature -FilePath $ExePath -Certificate $cert `
@@ -45,6 +49,9 @@ if ($signtool) {
 }
 
 $sig = Get-AuthenticodeSignature $ExePath
+if ($sig.SignerCertificate.Thumbprint -ne $Thumbprint) {
+    throw "File is not signed with certificate $Thumbprint"
+}
 Write-Host "Status : $($sig.Status)"
 Write-Host "Signer : $($sig.SignerCertificate.Subject)"
 if ($sig.Status -ne "Valid") { throw "Signing did not produce a valid signature." }

@@ -91,12 +91,10 @@ public partial class MainWindow : Window
         Closing += (_, _) =>
         {
             _statusPoll.Stop();
-            if (Grid.Columns.Count > 0)
+            if (_columns.Count > 0)
             {
-                var order = Grid.Columns
-                    .Select(col => _columns.FirstOrDefault(c => c.Column == col)?.Key)
-                    .Where(k => k is not null).Cast<string>().ToList();
-                if (order.Count > 0) { App.Settings.Columns = order; }
+                AdoptOnScreenOrder();
+                App.Settings.Columns = _columns.Where(c => c.Visible).Select(c => c.Key).ToList();
             }
             App.Settings.WindowWidth = Width;
             App.Settings.WindowHeight = Height;
@@ -118,8 +116,9 @@ public partial class MainWindow : Window
 
     private void ApplyLanguage()
     {
+        FlowDirection = Loc.Lang == "ar" ? FlowDirection.RightToLeft : FlowDirection.LeftToRight;
+        UpdateHiddenHint();
         Title = AppName;
-        TitleText.Text = AppName;
         ServerLabel.Text = Loc.T("Server");
         LoadButton.Content = Loc.T("Load");
         SearchHint.Text = Loc.T("Search");
@@ -133,7 +132,6 @@ public partial class MainWindow : Window
             ((IconItem)ThemeBox.Items[i]).Text = Loc.T(ThemeKeys[i]);
         ThemeBox.Items.Refresh();
         AddServerButton.Content = Loc.T("AddServer");
-        ThemeBox.ToolTip = Loc.T("Theme");
         LangButton.ToolTip = Loc.T("Language");
         foreach (var r in _rows) r.RefreshLanguage();
         foreach (var c in _columns) c.RefreshLabel();
@@ -169,21 +167,21 @@ public partial class MainWindow : Window
                 Width = 18, Height = 18,
                 Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center,
                 Fill = new System.Windows.Media.ImageBrush(Flag(code)) { Stretch = System.Windows.Media.Stretch.UniformToFill },
-                Stroke = (System.Windows.Media.Brush)Application.Current.Resources["Line"],
                 StrokeThickness = 1,
             });
-            content.Children.Add(new TextBlock
-            {
-                Text = native, VerticalAlignment = VerticalAlignment.Center,
-                Foreground = (System.Windows.Media.Brush)Application.Current.Resources[code == Loc.Lang ? "Accent" : "Ink"],
-            });
+            ((System.Windows.Shapes.Ellipse)content.Children[0]).SetResourceReference(
+                System.Windows.Shapes.Shape.StrokeProperty, "Line");
+
+            // Resource references (not snapshots) so the menu follows a theme switch
+            var label = new TextBlock { Text = native, VerticalAlignment = VerticalAlignment.Center };
+            label.SetResourceReference(TextBlock.ForegroundProperty, code == Loc.Lang ? "Accent" : "Ink");
+            content.Children.Add(label);
 
             var item = new Button
             {
-                Content = content, Tag = code, Cursor = Cursors.Hand,
-                Background = System.Windows.Media.Brushes.Transparent,
-                BorderThickness = new Thickness(0), Padding = new Thickness(10, 6, 12, 6),
-                HorizontalContentAlignment = HorizontalAlignment.Left, MinWidth = 132,
+                Content = content, Tag = code,
+                Style = (Style)FindResource("FlatMenuItem"),
+                Padding = new Thickness(10, 6, 12, 6), MinWidth = 132,
             };
             item.Click += (_, _) =>
             {
@@ -240,6 +238,14 @@ public partial class MainWindow : Window
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         const int WM_SETTINGCHANGE = 0x001A;
+        const int WM_ENTERSIZEMOVE = 0x0231, WM_EXITSIZEMOVE = 0x0232;
+        if (msg == WM_ENTERSIZEMOVE) _liveSizing = true;
+        if (msg == WM_EXITSIZEMOVE)
+        {
+            _liveSizing = false;
+            _liveFitTimer?.Stop();
+            LayoutColumns(List.ActualWidth);     // final, exact fit at the size the user let go
+        }
         if (msg == WM_SETTINGCHANGE &&
             App.Settings.Theme == "system" &&                       // explicit choice wins
             Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
@@ -313,6 +319,21 @@ public partial class MainWindow : Window
     // ---------- loading (all saved servers, aggregated) ----------
 
     private async Task LoadAllServersAsync()
+    {
+        try
+        {
+            await LoadAllServersCoreAsync();
+            // Rows exist only now — measure them once so the action column is verified on screen.
+            ScheduleVerify();
+        }
+        catch (Win32Exception ex) { ShowError(ex.NativeErrorCode, ServerBox.Text); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, AppName, MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async Task LoadAllServersCoreAsync()
     {
         if (_loading) return;
         _loading = true;
@@ -458,21 +479,32 @@ public partial class MainWindow : Window
     /// Re-reads status, installed state and the default printer without rebuilding the
     /// list: rows update in place, so scroll position, selection and search all survive.
     /// </summary>
+    private bool _polling;
+
     private async Task RefreshStatusAsync()
     {
-        if (_loading || _rows.Count == 0) return;
+        // An unreachable server can block EnumPrinters for the SMB timeout (20-45 s);
+        // polls must not stack up behind it.
+        if (_polling || _loading || _rows.Count == 0) return;
+        _polling = true;
+        try { await RefreshStatusCoreAsync(); }
+        finally { _polling = false; }
+    }
 
+    private async Task RefreshStatusCoreAsync()
+    {
         var servers = _servers.ToList();
         var snapshot = _rows.ToArray();
-        Dictionary<string, uint> status;
+        var stamps = snapshot.Select(r => r.ChangeStamp).ToArray();
+        Dictionary<string, (uint Status, uint Jobs)> status;
         HashSet<string> connections;
         string defaultPrinter;
         try
         {
             (status, connections, defaultPrinter) = await Task.Run(() =>
             {
-                var map = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
-                foreach (var p in NativePrinting.EnumerateLocalPrinters()) map[p.Name] = p.Status;
+                var map = new Dictionary<string, (uint, uint)>(StringComparer.OrdinalIgnoreCase);
+                foreach (var p in NativePrinting.EnumerateLocalPrinters()) map[p.Name] = (p.Status, p.Jobs);
                 foreach (var srv in servers)
                 {
                     try
@@ -481,7 +513,7 @@ public partial class MainWindow : Window
                         {
                             string unc = p.Name.StartsWith(@"\\", StringComparison.Ordinal)
                                 ? p.Name : srv + "\\" + p.Name;
-                            map[unc] = p.Status;
+                            map[unc] = (p.Status, p.Jobs);
                         }
                     }
                     catch { /* a server being briefly unreachable must not disturb the UI */ }
@@ -492,11 +524,14 @@ public partial class MainWindow : Window
         catch { return; }
 
         bool regroup = false;
-        foreach (var row in snapshot)
+        for (int i = 0; i < snapshot.Length; i++)
         {
-            if (status.TryGetValue(row.Unc, out uint flags)) row.StatusFlags = flags;
+            var row = snapshot[i];
+            if (status.TryGetValue(row.Unc, out var st)) { row.StatusFlags = st.Status; row.Jobs = st.Jobs; }
+            // Skip rows installed/removed while this poll was running: its data predates that.
+            if (row.Busy || row.ChangeStamp != stamps[i]) continue;
             bool installed = row.IsLocal || connections.Contains(row.Unc);
-            if (row.Installed != installed && !row.Busy) { row.Installed = installed; regroup = true; }
+            if (row.Installed != installed) { row.Installed = installed; regroup = true; }
             row.IsDefault = string.Equals(defaultPrinter, row.Unc, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -787,6 +822,14 @@ public partial class MainWindow : Window
         public required double Share { get; init; }
         public required double Min { get; init; }
         public bool CanHide { get; init; } = true;
+        /// <summary>
+        /// Order in which the column steps aside when the window is too narrow (lowest first).
+        /// 0 = never auto-hidden: Printer, Status and the action column always stay on screen.
+        /// </summary>
+        public int FitPriority { get; init; }
+        /// <summary>Chosen by the user but temporarily hidden because it doesn't fit. Never persisted.</summary>
+        public bool AutoHidden { get; set; }
+        public bool Shown => Visible && !AutoHidden;
 
         public string Label => Loc.T(LocKey);
 
@@ -819,24 +862,24 @@ public partial class MainWindow : Window
         {
             // what and where
             new() { Key = "printer",  LocKey = "ColPrinter",  Column = ColPrinter,  Share = .24, Min = 190, CanHide = false },
-            new() { Key = "location", LocKey = "ColLocation", Column = ColLocation, Share = .16, Min = 130 },
-            new() { Key = "ip",       LocKey = "ColIp",       Column = ColIp,       Share = .11, Min = 100 },
+            new() { Key = "location", LocKey = "ColLocation", Column = ColLocation, Share = .16, Min = 130, FitPriority = 13 },
+            new() { Key = "ip",       LocKey = "ColIp",       Column = ColIp,       Share = .11, Min = 110, FitPriority = 12 },
             // current state
-            new() { Key = "status",   LocKey = "ColStatus",   Column = ColStatus,   Share = .13, Min = 120 },
-            new() { Key = "toner",    LocKey = "ColToner",    Column = ColToner,    Share = .08, Min = 80 },
-            new() { Key = "trays",    LocKey = "ColTrays",    Column = ColTrays,    Share = .13, Min = 130 },
-            new() { Key = "jobs",     LocKey = "ColJobs",     Column = ColJobs,     Share = .05, Min = 60 },
+            new() { Key = "status",   LocKey = "ColStatus",   Column = ColStatus,   Share = .13, Min = 120, FitPriority = 0 },
+            new() { Key = "toner",    LocKey = "ColToner",    Column = ColToner,    Share = .08, Min = 80,  FitPriority = 9 },
+            new() { Key = "trays",    LocKey = "ColTrays",    Column = ColTrays,    Share = .13, Min = 130, FitPriority = 3 },
+            new() { Key = "jobs",     LocKey = "ColJobs",     Column = ColJobs,     Share = .05, Min = 70,  FitPriority = 7 },
             // device identity and history
-            new() { Key = "model",    LocKey = "ColModel",    Column = ColModel,    Share = .14, Min = 140 },
-            new() { Key = "serial",   LocKey = "ColSerial",   Column = ColSerial,   Share = .11, Min = 110 },
-            new() { Key = "pages",    LocKey = "ColPages",    Column = ColPages,    Share = .08, Min = 90 },
-            new() { Key = "uptime",   LocKey = "ColUptime",   Column = ColUptime,   Share = .07, Min = 80 },
-            new() { Key = "display",  LocKey = "ColDisplay",  Column = ColDisplay,  Share = .13, Min = 130 },
-            new() { Key = "driver",   LocKey = "ColDriver",   Column = ColDriver,   Share = .14, Min = 140 },
-            new() { Key = "drivertype",LocKey = "DriverType",  Column = ColDriverType, Share = .07, Min = 90 },
-            // action
-            new() { Key = "default",  LocKey = "Default",     Column = ColDefault,  Share = .05, Min = 70 },
-            new() { Key = "installed",LocKey = "ColAction",   Column = ColAction,   Share = .11, Min = 120, CanHide = false },
+            new() { Key = "model",    LocKey = "ColModel",    Column = ColModel,    Share = .14, Min = 140, FitPriority = 10 },
+            new() { Key = "serial",   LocKey = "ColSerial",   Column = ColSerial,   Share = .11, Min = 120, FitPriority = 6 },
+            new() { Key = "pages",    LocKey = "ColPages",    Column = ColPages,    Share = .08, Min = 90,  FitPriority = 8 },
+            new() { Key = "uptime",   LocKey = "ColUptime",   Column = ColUptime,   Share = .07, Min = 80,  FitPriority = 1 },
+            new() { Key = "display",  LocKey = "ColDisplay",  Column = ColDisplay,  Share = .13, Min = 130, FitPriority = 2 },
+            new() { Key = "driver",   LocKey = "ColDriver",   Column = ColDriver,   Share = .14, Min = 140, FitPriority = 4 },
+            new() { Key = "drivertype",LocKey = "DriverType",  Column = ColDriverType, Share = .07, Min = 90, FitPriority = 5 },
+            // action — always on screen, sized to its real content
+            new() { Key = "default",  LocKey = "Default",     Column = ColDefault,  Share = .05, Min = 70,  FitPriority = 11 },
+            new() { Key = "installed",LocKey = "ColAction",   Column = ColAction,   Share = .11, Min = 160, CanHide = false },
         };
 
                 var saved = App.Settings.Columns is { Count: > 0 } ? App.Settings.Columns.ToList() : DefaultColumns.ToList();
@@ -862,7 +905,9 @@ public partial class MainWindow : Window
             .ToList();
         EnforceEdgeColumns();
 
-        ColumnList.ItemsSource = _columns;
+        // The XAML declares every column; the grid must start empty so the declared order
+        // never overwrites the user's saved order, and switched-off columns never show.
+        Grid.Columns.Clear();
         ApplyColumns(save: false);
     }
 
@@ -909,20 +954,9 @@ public partial class MainWindow : Window
     private void ApplyColumns(bool save)
     {
         // If the user has dragged columns around, adopt that order before rebuilding
-        if (Grid.Columns.Count > 0)
-        {
-            var current = Grid.Columns.ToList();
-            _columns = _columns
-                .OrderBy(c => { int i = current.IndexOf(c.Column); return i < 0 ? int.MaxValue : i; })
-                .ToList();
-            EnforceEdgeColumns();
-        }
-
-        Grid.Columns.Clear();
-        foreach (var c in _columns.Where(c => c.Visible))
-            Grid.Columns.Add(c.Column);
-
-        LayoutColumns(List.ActualWidth);
+        AdoptOnScreenOrder();
+        foreach (var c in _columns) c.AutoHidden = false;   // re-evaluate fit from scratch
+        LayoutColumns(List.ActualWidth, force: true);
 
         if (!save) return;
         App.Settings.Columns = _columns.Where(c => c.Visible).Select(c => c.Key).ToList();
@@ -932,25 +966,206 @@ public partial class MainWindow : Window
     private void List_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (!_ready || e.NewSize.Width <= 0) return;
-        LayoutColumns(e.NewSize.Width);
+        _pendingWidth = e.NewSize.Width;
+        if (e.WidthChanged == false) return;      // height-only change: columns are unaffected
+        if (_liveSizing)
+        {
+            // While dragging, re-fit ~20x per second instead of every frame: the window
+            // edge follows the mouse at full speed, columns catch up without stutter.
+            if (_liveFitTimer is null)
+            {
+                _liveFitTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(50) };
+                _liveFitTimer.Tick += (_, _) => { _liveFitTimer!.Stop(); LayoutColumns(_pendingWidth); };
+            }
+            if (!_liveFitTimer.IsEnabled) _liveFitTimer.Start();
+            return;
+        }
+        if (_layoutQueued) return;                 // many SizeChanged per frame while dragging:
+        _layoutQueued = true;                      // lay out once, with the latest width
+        Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+        {
+            _layoutQueued = false;
+            LayoutColumns(_pendingWidth);
+        }));
     }
 
-    /// <summary>Distributes width across the visible columns, honouring each minimum.</summary>
-    private void LayoutColumns(double totalWidth)
+    /// <summary>
+    /// Folds a drag-reorder on screen back into the registry. Only columns currently on
+    /// screen are re-sequenced; auto-hidden ones keep their slots, so they reappear
+    /// exactly where the user put them.
+    /// </summary>
+    private void AdoptOnScreenOrder()
     {
-        if (_userSizedColumns) return;   // respect manual widths
-        var visible = _columns.Where(c => c.Visible).ToList();
-        if (visible.Count == 0) return;
+        if (Grid.Columns.Count == 0) return;
+        var onScreen = new Queue<ColumnOption>(Grid.Columns
+            .Select(col => _columns.FirstOrDefault(c => c.Column == col))
+            .Where(c => c is not null)!);
+        var shownSet = new HashSet<ColumnOption>(onScreen);
+        var reordered = _columns.Select(c => shownSet.Contains(c) ? onScreen.Dequeue() : c).ToList();
+        if (reordered.SequenceEqual(_columns)) return;   // keep the instance: the chooser stays bound
+        _columns = reordered;
+        EnforceEdgeColumns();
+    }
 
-        double available = totalWidth - SystemParameters.VerticalScrollBarWidth - 10;
-        if (available <= 0) return;
+    /// <summary>
+    /// Fits the grid to the window. When the chosen columns don't fit (small laptop,
+    /// 125-150 % scaling, half-screen snap) the least important ones step aside,
+    /// lowest FitPriority first, until everything fits — Printer, Status and the
+    /// Install/Remove column are never hidden. Widening the window brings them back.
+    /// </summary>
+    private void LayoutColumns(double totalWidth, bool force = false)
+    {
+        var chosen = _columns.Where(c => c.Visible).ToList();
+        if (chosen.Count == 0) return;
 
-        double shareSum = visible.Sum(c => c.Share);
-        double minSum = visible.Sum(c => c.Min);
-        bool cramped = available < minSum;
+        // Before the first layout pass the width is 0: show the full chosen set now,
+        // and let the first real SizeChanged decide what has to step aside.
+        // Rows carry 10px padding each side (row template Padding="10,7"): that 20px is
+        // real width too. Missing it clipped the last column's right edge (test-page button).
+        const double RowPadding = 20, Gutter = 8;
+        double available = totalWidth - SystemParameters.VerticalScrollBarWidth - RowPadding - Gutter - _overflowCorrection;
+        bool measured = totalWidth > 0 && available > 0;
 
-        foreach (var c in visible)
-            c.Column.Width = cramped ? c.Min : Math.Max(c.Min, available * (c.Share / shareSum));
+        // Which columns fit? Start from everything chosen and drop by priority.
+        var fit = new HashSet<ColumnOption>(chosen);
+        if (measured)
+        {
+            foreach (var c in chosen.Where(c => c.CanHide && c.FitPriority > 0).OrderBy(c => c.FitPriority))
+            {
+                if (fit.Sum(x => x.Min) <= available) break;
+                fit.Remove(c);
+            }
+        }
+
+        bool setChanged = force || chosen.Any(c => c.AutoHidden == fit.Contains(c));
+        foreach (var c in chosen) c.AutoHidden = !fit.Contains(c);
+
+        if (setChanged)
+        {
+            AdoptOnScreenOrder();
+            Grid.Columns.Clear();
+            foreach (var c in _columns.Where(c => c.Shown))
+                Grid.Columns.Add(c.Column);
+            if (!ReferenceEquals(ColumnList.ItemsSource, _columns))
+            {
+                ColumnList.ItemsSource = null;      // order changed: rebind (keeps focus otherwise)
+                ColumnList.ItemsSource = _columns;
+            }
+            UpdateHiddenHint();
+        }
+        if (!measured) return;
+
+        var shown = _columns.Where(c => c.Shown).ToList();
+        double minSum = shown.Sum(c => c.Min);
+
+        // Manual widths are honoured only while they still fit; otherwise the
+        // action column would be pushed off screen again.
+        if (_userSizedColumns)
+        {
+            if (shown.Sum(c => c.Column.ActualWidth > 0 ? c.Column.ActualWidth : c.Min) <= available) return;
+            _userSizedColumns = false;
+        }
+
+        foreach (var (c, w) in Distribute(shown, available))
+            if (double.IsNaN(c.Column.Width) || Math.Abs(c.Column.Width - w) >= 0.5)
+                c.Column.Width = w;
+
+        // Safety net: once the window has settled, measure what was actually drawn.
+        ScheduleVerify();
+    }
+
+    /// <summary>
+    /// Splits the width by share, but never below a column's minimum — and, crucially,
+    /// takes the space a bumped-up column needs back from the others. The old
+    /// "max(min, share)" gave small columns their minimum without shrinking anyone else,
+    /// so the total overran the window and cut off Install/Remove.
+    /// Result: widths sum to exactly <paramref name="available"/> whenever it fits.
+    /// </summary>
+    internal static List<(ColumnOption Col, double Width)> Distribute(List<ColumnOption> cols, double available)
+    {
+        var fixedAtMin = new HashSet<ColumnOption>();
+        while (true)
+        {
+            var flex = cols.Where(c => !fixedAtMin.Contains(c)).ToList();
+            double left = available - fixedAtMin.Sum(c => c.Min);
+            double shareSum = flex.Sum(c => c.Share);
+            var bumped = flex.Where(c => shareSum <= 0 || left * c.Share / shareSum < c.Min).ToList();
+            if (bumped.Count == 0 || flex.Count == 0)
+            {
+                return cols.Select(c => (c, fixedAtMin.Contains(c) || shareSum <= 0
+                    ? c.Min
+                    : Math.Floor(left * c.Share / shareSum))).ToList();
+            }
+            foreach (var c in bumped) fixedAtMin.Add(c);
+            if (fixedAtMin.Count == cols.Count)
+                return cols.Select(c => (c, c.Min)).ToList();   // narrower than the minimums
+        }
+    }
+
+    private double _overflowCorrection;
+    private double _pendingWidth;
+    private bool _liveSizing;
+    private DispatcherTimer? _liveFitTimer;
+    private bool _layoutQueued;
+    private ScrollViewer? _listScroller;
+
+    /// <summary>
+    /// The on-screen check is expensive-ish (visual tree lookup), so it runs once the
+    /// window has settled — never per frame while the user drags the edge.
+    /// </summary>
+    private DispatcherTimer? _verifyTimer;
+
+    private void ScheduleVerify()
+    {
+        if (_verifyTimer is null)
+        {
+            _verifyTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
+            _verifyTimer.Tick += (_, _) => { _verifyTimer!.Stop(); VerifyActionColumnVisible(); };
+        }
+        _verifyTimer.Stop();
+        _verifyTimer.Start();
+    }
+
+    /// <summary>
+    /// After layout, checks that the last column's right edge is inside the visible
+    /// area. If not, the difference is remembered and the fit re-run — self-correcting
+    /// whatever the screen, scaling or theme.
+    /// </summary>
+    private void VerifyActionColumnVisible()
+    {
+        _listScroller ??= FindChild<ScrollViewer>(List);
+        var sv = _listScroller;
+        var row = sv is null ? null : FindChild<GridViewRowPresenter>(sv);
+        if (sv is null || row is null || sv.ViewportWidth <= 0) return;
+
+        double rightEdge = row.TranslatePoint(new Point(Grid.Columns.Sum(c => c.ActualWidth), 0), sv).X;
+        double overflow = rightEdge - sv.ViewportWidth;
+        // Real template chrome is a few pixels; anything larger is a transient reading.
+        if (overflow > 0.5 && overflow < 60 && _overflowCorrection < 60)
+        {
+            _overflowCorrection += Math.Ceiling(overflow) + 2;
+            LayoutColumns(List.ActualWidth);   // widths only — no column rebuild
+        }
+    }
+
+    private static T? FindChild<T>(DependencyObject root) where T : DependencyObject
+    {
+        for (int i = 0; i < System.Windows.Media.VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+            if (child is T hit) return hit;
+            if (FindChild<T>(child) is { } deeper) return deeper;
+        }
+        return null;
+    }
+
+    /// <summary>Tells the user that columns stepped aside, so nothing seems to have vanished.</summary>
+    private void UpdateHiddenHint()
+    {
+        int hidden = _columns.Count(c => c.Visible && c.AutoHidden);
+        HiddenColumnsText.Text = hidden == 0 ? "" : string.Format(Loc.T("ColsHidden"), hidden);
+        HiddenColumnsText.ToolTip = hidden == 0 ? null
+            : string.Join(", ", _columns.Where(c => c.Visible && c.AutoHidden).Select(c => c.Label));
     }
 
     // ---------- install / remove ----------
@@ -992,7 +1207,7 @@ public partial class MainWindow : Window
 
     /// <summary>The Load spinner covers server loading; per-row rings cover installs.</summary>
     private void UpdateActivity() =>
-        LoadSpinner.Visibility = _loading ? Visibility.Visible : Visibility.Collapsed;
+        LoadSpinner.Visibility = _loading ? Visibility.Visible : Visibility.Hidden;
 
     private async Task InstallAsync(PrinterRow row)
     {
@@ -1049,7 +1264,7 @@ public partial class MainWindow : Window
 
     // ---------- default printer ----------
 
-    private void SetDefault_Click(object sender, RoutedEventArgs e)
+    private async void SetDefault_Click(object sender, RoutedEventArgs e)
     {
         var row = (sender as FrameworkElement)?.DataContext as PrinterRow
                   ?? List.SelectedItem as PrinterRow;
@@ -1062,7 +1277,7 @@ public partial class MainWindow : Window
         }
         try
         {
-            NativePrinting.MakeDefault(row.Unc);
+            await Task.Run(() => NativePrinting.MakeDefault(row.Unc));
             foreach (var r in _rows) r.IsDefault = ReferenceEquals(r, row);
         }
         catch (Win32Exception ex)
@@ -1140,6 +1355,10 @@ public partial class MainWindow : Window
         PrinterRow target;
         if (installed.Count == 1)
         {
+            // Only when the user has no working default at all — a default on a server
+            // this app hasn't loaded is still a valid choice and must be left alone.
+            if (!removedWasDefault &&
+                (await Task.Run(NativePrinting.GetDefault)).Length > 0) return;
             target = installed[0];
         }
         else if (removedWasDefault)
@@ -1192,13 +1411,16 @@ public partial class MainWindow : Window
             {
                 r.Name, r.LocationDisplay, r.IpDisplay, r.StatusText,
                 string.Join(" · ", r.Toner.Select(t => t.Tooltip)), r.Trays,
-                r.JobsText, r.Model, r.Serial, r.PagesText, r.UptimeText,
+                r.Jobs == 0 ? "" : r.Jobs.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                r.Model, r.Serial,
+                r.Pages < 0 ? "" : r.Pages.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                r.UptimeText,
                 r.Display, r.Driver, r.DriverTypeText, r.IsLocal ? Loc.T("ThisPC") : r.ServerShort,
                 r.IsDefault ? "✓" : "", r.Installed ? "✓" : "",
             });
         try
         {
-            Xlsx.Write(dlg.FileName, headers, data);
+            Xlsx.Write(dlg.FileName, headers, data, numericColumns: new[] { 6, 9 });   // Jobs, Pages
             ShowExportDone(dlg.FileName);
         }
         catch (Exception ex)
@@ -1346,6 +1568,8 @@ public partial class MainWindow : Window
 
     private readonly DispatcherTimer _copyFlash = new() { Interval = TimeSpan.FromSeconds(1.6) };
 
+    private readonly HashSet<TextBlock> _flashingGlyphs = new();
+
     private void Copy_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.Tag is not string value || value.Length == 0) return;
@@ -1353,7 +1577,7 @@ public partial class MainWindow : Window
 
         // Feedback where the click happened: the copy glyph flips to an accent
         // checkmark for a moment, plus the status-bar line.
-        if (sender is Button btn && FindGlyph(btn) is { } glyph)
+        if (sender is Button btn && FindGlyph(btn) is { } glyph && _flashingGlyphs.Add(glyph))
         {
             string original = glyph.Text;
             var originalBrush = glyph.Foreground;
@@ -1365,6 +1589,7 @@ public partial class MainWindow : Window
                 t.Stop();
                 glyph.Text = original;
                 glyph.Foreground = originalBrush;
+                _flashingGlyphs.Remove(glyph);
             };
             t.Start();
         }

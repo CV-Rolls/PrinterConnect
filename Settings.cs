@@ -22,13 +22,30 @@ public sealed class Settings
         System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "PrinterConnect", "settings.json");
 
+    private static string BackupPath => Path + ".bak";
+
     public static Settings Load()
+    {
+        // A second instance may be mid-save: retry briefly, then fall back to the backup
+        // before starting from defaults — defaults would overwrite the real settings.
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try { return TryLoad(Path) ?? TryLoad(BackupPath) ?? new Settings(); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                System.Threading.Thread.Sleep(100);   // mid-swap by another instance
+            }
+        }
+        return TryLoad(BackupPath) ?? new Settings();
+    }
+
+    private static Settings? TryLoad(string file)
     {
         try
         {
-            if (File.Exists(Path))
+            if (File.Exists(file))
             {
-                using var fs = File.OpenRead(Path);
+                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 var ser = new DataContractJsonSerializer(typeof(Settings));
                 if (ser.ReadObject(fs) is Settings s)
                 {
@@ -41,8 +58,9 @@ public sealed class Settings
                 }
             }
         }
-        catch { /* corrupt settings — start fresh */ }
-        return new Settings();
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw; }   // locked: retry
+        catch { /* corrupt — try the backup */ }
+        return null;
     }
 
     public void Save()
@@ -52,7 +70,12 @@ public sealed class Settings
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
             using var ms = new MemoryStream();
             new DataContractJsonSerializer(typeof(Settings)).WriteObject(ms, this);
-            File.WriteAllBytes(Path, ms.ToArray());
+            // Write-then-swap: a crash or full disk mid-write can never leave an empty
+            // settings file behind; the previous good copy is kept as settings.json.bak.
+            string tmp = Path + ".tmp";
+            File.WriteAllBytes(tmp, ms.ToArray());
+            if (File.Exists(Path)) File.Replace(tmp, Path, BackupPath, ignoreMetadataErrors: true);
+            else File.Move(tmp, Path);
         }
         catch { /* non-fatal */ }
     }

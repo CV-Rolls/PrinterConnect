@@ -61,7 +61,7 @@ public static class Snmp
     }
 
     /// <summary>One pass over a device, fetching only the parts the UI actually shows.
-    /// v2c is tried first: with GETBULK and multi-varbind GET it needs 2-4 round trips
+    /// v2c is tried first: with multi-varbind GET it needs 2-4 round trips
     /// per device instead of dozens, so results land near-instantly on a LAN.</summary>
     public static async Task<DeviceInfo?> QueryDeviceAsync(IEnumerable<string> hosts, Needs needs, CancellationToken ct)
     {
@@ -92,14 +92,15 @@ public static class Snmp
         if (oids.Count == 0) return new Dictionary<string, object>();
         using var udp = new UdpClient(ip.AddressFamily);
         udp.Connect(ip, 161);
-        byte[] packet = BuildGet(_rng.Next(1, int.MaxValue), oids, 1);
+        int requestId = _rng.Next(1, int.MaxValue);
+        byte[] packet = BuildGet(requestId, oids, 1);
         await udp.SendAsync(packet, packet.Length);
         try
         {
             var recv = udp.ReceiveAsync();
             var done = await Task.WhenAny(recv, Task.Delay(700, ct));
             if (done != recv) return null;
-            var binds = ParseResponseMulti(recv.Result.Buffer);
+            var binds = ParseResponseMulti(recv.Result.Buffer, requestId);
             if (binds is null) return null;
             var map = new Dictionary<string, object>();
             foreach (var (oid, value) in binds)
@@ -165,7 +166,7 @@ public static class Snmp
                 }
             }
 
-            // Tables: supplies and trays — GETBULK on v2c makes each one round trip
+            // Tables: supplies and trays — GETNEXT walk, one round trip per row
             Task<Dictionary<int, object>?> T(int[] oid) => WalkAsync(ip, oid, version, ct);
             var tDesc  = needs.HasFlag(Needs.Supplies) ? T(OidDesc) : null;
             var tMax   = needs.HasFlag(Needs.Supplies) ? T(OidMax) : null;
@@ -237,8 +238,7 @@ public static class Snmp
         }
         catch
         {
-            DnsCache[host] = null;
-            return null;
+            return null;   // not cached: a VPN that isn't up yet must not hide the printer until restart
         }
     }
 
@@ -258,18 +258,20 @@ public static class Snmp
             byte[] packet = BuildGetNext(requestId + hop, current, version);
             await udp.SendAsync(packet, packet.Length);
 
-            UdpReceiveResult resp;
+            // A duplicate or stale datagram must not end the walk: keep listening for the
+            // reply that carries this hop's request-id until the deadline.
+            (int[] Oid, object Value)? vb = null;
             try
             {
-                var recv = udp.ReceiveAsync();
-                var done = await Task.WhenAny(recv, Task.Delay(700, ct));
-                if (done != recv) return result.Count > 0 ? result : null;
-                resp = recv.Result;
+                var deadline = Task.Delay(700, ct);
+                while (vb is null)
+                {
+                    var recv = udp.ReceiveAsync();
+                    if (await Task.WhenAny(recv, deadline) != recv) return result.Count > 0 ? result : null;
+                    vb = ParseResponse(recv.Result.Buffer, requestId + hop);
+                }
             }
             catch { return result.Count > 0 ? result : null; }
-
-            var vb = ParseResponse(resp.Buffer);
-            if (vb is null) return result.Count > 0 ? result : null;
             var (oid, value) = vb.Value;
 
             if (!StartsWith(oid, baseOid)) break;          // walked past the column
@@ -308,9 +310,6 @@ public static class Snmp
     private static byte[] BuildGetNext(int requestId, int[] oid, int version) =>
         BuildPdu(0xA1, requestId, 0, 0, new[] { oid }, version);
 
-    /// <summary>SNMPv2c GETBULK — one round trip returns up to maxRep table rows.</summary>
-    private static byte[] BuildGetBulk(int requestId, int[] oid, int maxRep) =>
-        BuildPdu(0xA5, requestId, 0, maxRep, new[] { oid }, 1);
 
     /// <summary>Multi-varbind GET — several scalars fetched in a single round trip (v2c).</summary>
     public static byte[] BuildGet(int requestId, IEnumerable<int[]> oids, int version) =>
@@ -364,13 +363,13 @@ public static class Snmp
 
     // ---------- BER decoding ----------
 
-    private static (int[] Oid, object Value)? ParseResponse(byte[] data)
+    private static (int[] Oid, object Value)? ParseResponse(byte[] data, int expectedId)
     {
-        var all = ParseResponseMulti(data);
+        var all = ParseResponseMulti(data, expectedId);
         return all is { Count: > 0 } ? all[0] : null;
     }
 
-    private static List<(int[] Oid, object Value)>? ParseResponseMulti(byte[] data)
+    private static List<(int[] Oid, object Value)>? ParseResponseMulti(byte[] data, int expectedId)
     {
         try
         {
@@ -379,7 +378,7 @@ public static class Snmp
             SkipTlv(data, ref pos);                     // version
             SkipTlv(data, ref pos);                     // community
             ReadHeader(data, ref pos, 0xA2);            // GetResponse PDU
-            SkipTlv(data, ref pos);                     // request-id
+            if (ReadIntTlv(data, ref pos) != expectedId) return null;   // stale or spoofed reply
             int errStatus = ReadIntTlv(data, ref pos);  // error-status
             SkipTlv(data, ref pos);                     // error-index
             if (errStatus != 0) return null;
@@ -404,13 +403,22 @@ public static class Snmp
         return ReadLength(d, ref pos);
     }
 
+    /// <summary>
+    /// BER length. Hardened against hostile packets: a device on the LAN controls these
+    /// bytes, so negative, oversized or indefinite lengths are rejected instead of letting
+    /// the parser walk backwards (infinite loop) or allocate gigabytes.
+    /// </summary>
     private static int ReadLength(byte[] d, ref int pos)
     {
         int len = d[pos++];
-        if ((len & 0x80) == 0) return len;
-        int n = len & 0x7F;
-        len = 0;
-        for (int i = 0; i < n; i++) len = (len << 8) | d[pos++];
+        if ((len & 0x80) != 0)
+        {
+            int n = len & 0x7F;
+            if (n == 0 || n > 3) throw new FormatException();   // indefinite / absurd
+            len = 0;
+            for (int i = 0; i < n; i++) len = (len << 8) | d[pos++];
+        }
+        if (len < 0 || len > d.Length - pos) throw new FormatException();
         return len;
     }
 

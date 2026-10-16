@@ -15,16 +15,32 @@ public partial class App : Application
         {
             Report(args.Exception);
             args.Handled = true;
+            // A failure before the window ever appeared must end the process —
+            // otherwise an invisible PrinterConnect.exe keeps running.
+            if (MainWindow is not { IsLoaded: true }) Shutdown(1);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             Report(args.ExceptionObject as Exception);
+        // Fire-and-forget tasks: log instead of losing the error silently (no UI —
+        // this runs on the finalizer thread).
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            args.SetObserved();
+            // Timed-out SNMP/probe socket reads are abandoned on purpose and fault when the
+            // socket closes — expected, not errors. error.log stays crash-only.
+            bool expected = args.Exception.Flatten().InnerExceptions.All(x =>
+                x is ObjectDisposedException or System.Net.Sockets.SocketException or OperationCanceledException);
+            if (!expected) Report(args.Exception, showUi: false);
+        };
 
         Loc.Init(Settings.Language);
         base.OnStartup(e);
-        ThemeManager.Apply(ThemeManager.IsDark());
+        // The saved Light/Dark choice wins over the Windows setting from the first frame.
+        bool dark = Settings.Theme switch { "light" => false, "dark" => true, _ => ThemeManager.IsDark() };
+        ThemeManager.Apply(dark);
     }
 
-    private static void Report(Exception? ex)
+    private static void Report(Exception? ex, bool showUi = true)
     {
         if (ex is null) return;
         string path = "";
@@ -38,6 +54,7 @@ public partial class App : Application
         }
         catch { /* logging must never throw */ }
 
+        if (!showUi) return;
         try
         {
             MessageBox.Show(

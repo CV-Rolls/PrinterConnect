@@ -61,7 +61,7 @@ public static class ThemeManager
             Set("Hover", Color.FromRgb(0x33, 0x33, 0x33));
             Set("TonerTrack", Color.FromRgb(0x40, 0x40, 0x40));
             Set("TonerK", Color.FromRgb(0xC9, 0xCD, 0xD2));  // "black" toner readable on dark
-            Set("Hint", Color.FromRgb(0x77, 0x77, 0x77));
+            Set("Hint", Color.FromRgb(0x8E, 0x8E, 0x8E));   // ≥4.5:1 on the dark card
             Set("PinnedBg", Color.FromRgb(0x2C, 0x31, 0x38));
             Set("DefaultRowBg", Color.FromRgb(0x1F, 0x33, 0x4A));
             Set("Danger", Color.FromRgb(0xD8, 0x4A, 0x3E));
@@ -78,7 +78,7 @@ public static class ThemeManager
             Set("Hover", Color.FromRgb(0xF2, 0xF5, 0xF9));
             Set("TonerTrack", Color.FromRgb(0xED, 0xEF, 0xF3));
             Set("TonerK", Color.FromRgb(0x30, 0x33, 0x38));
-            Set("Hint", Color.FromRgb(0x9A, 0xA1, 0xAC));
+            Set("Hint", Color.FromRgb(0x6E, 0x75, 0x80));   // ≥4.5:1 on white
             Set("PinnedBg", Color.FromRgb(0xF4, 0xF9, 0xFE));
             Set("DefaultRowBg", Color.FromRgb(0xDC, 0xE8, 0xF7));
             Set("Danger", Color.FromRgb(0xC4, 0x2B, 0x1C));
@@ -87,9 +87,18 @@ public static class ThemeManager
         }
 
         Set("Accent", accentFg);
+        // Win11 puts dark text on light accents (always in dark mode); pick by luminance
+        // so a light user accent never ends up as white-on-near-white.
+        Set("AccentText", Luminance(accentFg) > 0.45 ? Color.FromRgb(0x10, 0x10, 0x10) : Colors.White);
         Set("AccentHover", accentHover);
         r["AccentSoft"] = Freeze(new SolidColorBrush(Color.FromArgb(dark ? (byte)0x33 : (byte)0x1E,
             accentFg.R, accentFg.G, accentFg.B)));
+    }
+
+    private static double Luminance(Color c)
+    {
+        static double Lin(byte v) { double s = v / 255.0; return s <= 0.03928 ? s / 12.92 : Math.Pow((s + 0.055) / 1.055, 2.4); }
+        return 0.2126 * Lin(c.R) + 0.7152 * Lin(c.G) + 0.0722 * Lin(c.B);
     }
 
     private const int DWMWA_BORDER_COLOR = 34;

@@ -322,23 +322,37 @@ public static class NativePrinting
         return set;
     }
 
+    private const int ERROR_INSUFFICIENT_BUFFER = 122;
+
     private static IEnumerable<PRINTER_INFO_2> Enumerate(int flags, string? name)
     {
-        EnumPrinters(flags, name, 2, IntPtr.Zero, 0, out uint needed, out _);
+        // A successful probe means "nothing to return" (e.g. a user with no connections).
+        // The return value must be checked first: GetLastWin32Error() after success is stale.
+        bool empty = EnumPrinters(flags, name, 2, IntPtr.Zero, 0, out uint needed, out _);
+        if (empty) yield break;
         if (needed == 0)
         {
             int err = Marshal.GetLastWin32Error();
-            const int ERROR_INSUFFICIENT_BUFFER = 122;
-            if (err != 0 && err != ERROR_INSUFFICIENT_BUFFER)
-                throw new Win32Exception(err);
-            yield break;
+            if (err == 0 || err == ERROR_INSUFFICIENT_BUFFER) yield break;
+            throw new Win32Exception(err);
         }
 
-        IntPtr buf = Marshal.AllocHGlobal((int)needed);
+        // The list can grow between the size probe and the real call on a busy server.
+        IntPtr buf = IntPtr.Zero;
+        uint count = 0;
+        for (int attempt = 0; ; attempt++)
+        {
+            buf = Marshal.AllocHGlobal((int)needed);
+            if (EnumPrinters(flags, name, 2, buf, needed, out uint more, out count)) break;
+            int err = Marshal.GetLastWin32Error();
+            Marshal.FreeHGlobal(buf);
+            buf = IntPtr.Zero;
+            if (err != ERROR_INSUFFICIENT_BUFFER || attempt >= 3) throw new Win32Exception(err);
+            needed = more;
+        }
+
         try
         {
-            if (!EnumPrinters(flags, name, 2, buf, needed, out needed, out uint count))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
 
             int size = Marshal.SizeOf<PRINTER_INFO_2>();
             for (int i = 0; i < count; i++)
@@ -391,18 +405,9 @@ public static class NativePrinting
         var sb = new System.Text.StringBuilder(size);
         if (!GetDefaultPrinter(sb, ref size)) return "";
 
-        string name = sb.ToString().Trim();
-        if (name.StartsWith(@"\\", StringComparison.Ordinal)) return name;
-
-        int on = name.LastIndexOf(" on ", StringComparison.OrdinalIgnoreCase);
-        if (on > 0)
-        {
-            string printer = name.Substring(0, on);
-            string server = name.Substring(on + 4).Trim();
-            if (server.Length > 0)
-                return @"\\" + server.TrimStart('\\') + "\\" + printer;
-        }
-        return name;
+        // Connections come back as \\server\printer; local queues by name. No " on "
+        // splitting — a local printer called "HP on 3rd floor" is a legitimate name.
+        return sb.ToString().Trim();
     }
 
     private const int PRINTER_CONTROL_PURGE = 3;
@@ -435,9 +440,9 @@ public static class NativePrinting
     }
 
     /// <summary>
-    /// Clears a print queue. With manage rights the whole queue is purged in one call;
-    /// otherwise the current user's own jobs are deleted individually — which standard
-    /// users are always permitted to do.
+    /// Clears a print queue. With Manage Printers rights the whole queue is purged in one
+    /// call; otherwise every job the user is allowed to delete is deleted individually
+    /// (their own always; everyone's with Manage Documents rights).
     /// </summary>
     /// <returns>Jobs removed (-1 = full purge, exact count unknown).</returns>
     public static int ClearQueue(string printerName)
@@ -453,26 +458,37 @@ public static class NativePrinting
             finally { ClosePrinter(hAdmin); }
         }
 
-        // Tier 2: delete only this user's jobs
+        // Tier 2: delete every job Windows lets this user delete — their own always,
+        // everyone's with Manage Documents rights. Windows enforces it per job.
         var pdUse = new PRINTER_DEFAULTS { DesiredAccess = PRINTER_ACCESS_USE };
         if (!OpenPrinter(printerName, out IntPtr h, ref pdUse))
             throw new Win32Exception(Marshal.GetLastWin32Error());
         try
         {
+            // Jobs arrive constantly on a shared queue: retry if the list grew in between.
             EnumJobs(h, 0, 512, 1, IntPtr.Zero, 0, out uint needed, out _);
             if (needed == 0) return 0;
-            IntPtr buf = Marshal.AllocHGlobal((int)needed);
+            IntPtr buf = IntPtr.Zero;
+            uint count = 0;
+            for (int attempt = 0; ; attempt++)
+            {
+                buf = Marshal.AllocHGlobal((int)needed);
+                if (EnumJobs(h, 0, 512, 1, buf, needed, out uint more, out count)) break;
+                int err = Marshal.GetLastWin32Error();
+                Marshal.FreeHGlobal(buf);
+                buf = IntPtr.Zero;
+                if (err != ERROR_INSUFFICIENT_BUFFER || attempt >= 3) return 0;
+                needed = more;
+            }
             try
             {
-                if (!EnumJobs(h, 0, 512, 1, buf, needed, out needed, out uint count)) return 0;
                 int size = Marshal.SizeOf<JOB_INFO_1_RAW>();
-                string me = Environment.UserName;
                 int removed = 0;
+                // Try every job: Windows itself decides. Standard users may delete their own;
+                // users with Manage Documents rights may delete everyone's.
                 for (int i = 0; i < count; i++)
                 {
                     var job = Marshal.PtrToStructure<JOB_INFO_1_RAW>(buf + i * size);
-                    string owner = Marshal.PtrToStringUni(job.pUserName) ?? "";
-                    if (!string.Equals(owner, me, StringComparison.OrdinalIgnoreCase)) continue;
                     if (SetJob(h, job.JobId, 0, IntPtr.Zero, JOB_CONTROL_DELETE)) removed++;
                 }
                 return removed;
@@ -492,7 +508,8 @@ public static class NativePrinting
     public static string ErrorKey(int win32Error) => win32Error switch
     {
         0x011B => "Err_Rpc",          // 0x0000011b RPC auth level mismatch / firewall
-        0x0BCB => "Err_Driver",       // driver not found on server for client arch
+        0x0BCB => "Err_AccessDenied", // ERROR_PRINTER_DRIVER_DOWNLOAD_NEEDED: Point-and-Print needs admin
+        0x0705 => "Err_Driver",       // ERROR_UNKNOWN_PRINTER_DRIVER
         0x0709 => "Err_NotFound",     // printer name invalid / server unreachable
         5      => "Err_AccessDenied", // Point-and-Print policy blocks non-admin install
         0x07D1 => "Err_Driver",       // unknown driver

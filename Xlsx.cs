@@ -10,8 +10,14 @@ namespace PrinterTool;
 /// </summary>
 public static class Xlsx
 {
-    public static void Write(string path, IReadOnlyList<string> headers, IEnumerable<IReadOnlyList<string>> rows)
+    /// <param name="numericColumns">
+    /// Column indexes written as real numbers. Everything else stays text: guessing from the
+    /// value turned serials like "00123456" into 123456 and long ids into 1.23E+17.
+    /// </param>
+    public static void Write(string path, IReadOnlyList<string> headers, IEnumerable<IReadOnlyList<string>> rows,
+        IReadOnlyCollection<int>? numericColumns = null)
     {
+        var numeric = new HashSet<int>(numericColumns ?? Array.Empty<int>());
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
         using var zip = new ZipArchive(fs, ZipArchiveMode.Create);
 
@@ -64,11 +70,13 @@ public static class Xlsx
         void Row(IReadOnlyList<string> cells, bool bold)
         {
             sb.Append("<row>");
-            foreach (var cell in cells)
+            for (int col = 0; col < cells.Count; col++)
             {
-                // numbers become real numeric cells so Excel can sum/sort them
-                string raw = (cell ?? "").Replace("'", "").Replace(",", "");
-                if (raw.Length > 0 && long.TryParse(raw, out long n) && cell!.IndexOf('.') < 0)
+                string cell = cells[col] ?? "";
+                // Only declared numeric columns, parsed culture-invariantly
+                if (!bold && numeric.Contains(col) &&
+                    long.TryParse(cell, System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out long n))
                 {
                     sb.Append("<c t=\"n\"").Append(bold ? " s=\"1\"" : "").Append("><v>")
                       .Append(n).Append("</v></c>");
@@ -76,7 +84,7 @@ public static class Xlsx
                 else
                 {
                     sb.Append("<c t=\"inlineStr\"").Append(bold ? " s=\"1\"" : "").Append("><is><t xml:space=\"preserve\">")
-                      .Append(System.Security.SecurityElement.Escape(XmlSafe(cell ?? "")))
+                      .Append(System.Security.SecurityElement.Escape(XmlSafe(cell)))
                       .Append("</t></is></c>");
                 }
             }
@@ -94,8 +102,14 @@ public static class Xlsx
     private static string XmlSafe(string s)
     {
         var sb = new StringBuilder(s.Length);
-        foreach (char ch in s)
+        for (int i = 0; i < s.Length; i++)
         {
+            char ch = s[i];
+            if (char.IsHighSurrogate(ch) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                sb.Append(ch).Append(s[++i]);    // valid pair (emoji, rare CJK) is legal XML
+                continue;
+            }
             bool ok = ch == '\t' || ch == '\n' || ch == '\r'
                       || (ch >= 0x20 && ch <= 0xD7FF)
                       || (ch >= 0xE000 && ch <= 0xFFFD);
