@@ -8,6 +8,8 @@ All notable changes to PrinterConnect. Newest first.
   rounded square with the white printer and colour toner stripes; "Printer" light +
   "Connect" semibold + gradient dot
 - About shows "Developed by Roland Aring"
+- Release builds are signed with Sigstore cosign (keyless); the `.sigstore.json`
+  bundle is attached to each release so anyone can verify the exe's origin
 
 ## 3.11.4 — 2026-09-30
 

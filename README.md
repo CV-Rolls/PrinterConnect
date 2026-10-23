@@ -119,6 +119,25 @@ with your certificate, allow-list the publisher once in your security tools, and
 every future signed build is trusted automatically. Release notes include the
 SHA256 of every published binary.
 
+### How can I verify a download really came from this repository?
+
+Every release exe is signed with [Sigstore cosign](https://docs.sigstore.dev/) by
+this repo's GitHub Actions build — keyless, with the signature recorded in the public
+Rekor transparency log. Download the exe and its `.sigstore.json` file from the release,
+then run:
+
+```
+cosign verify-blob PrinterConnect-3.12.0.exe ^
+  --bundle PrinterConnect-3.12.0.exe.sigstore.json ^
+  --certificate-identity-regexp "^https://github\.com/CV-Rolls/PrinterConnect/\.github/workflows/build\.yml@refs/tags/v" ^
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+`Verified OK` means the file is byte-for-byte what this repository's workflow built
+from that release tag. This proves origin and integrity; it is separate from Windows
+Authenticode, so SmartScreen may still show "Unknown publisher" until the exe is also
+signed with a code-signing certificate (`deploy\sign.ps1`).
+
 ### Does it send any data anywhere?
 
 No. There is no telemetry, no update check, no analytics, and no inbound
