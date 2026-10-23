@@ -129,7 +129,7 @@ then run:
 ```
 cosign verify-blob PrinterConnect-3.12.0.exe ^
   --bundle PrinterConnect-3.12.0.exe.sigstore.json ^
-  --certificate-identity-regexp "^https://github\.com/CV-Rolls/PrinterConnect/\.github/workflows/build\.yml@refs/tags/v" ^
+  --certificate-identity-regexp "^https://github\.com/CV-Rolls/PrinterConnect/\.github/workflows/build\.yml@refs/(tags/v|heads/main)" ^
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
